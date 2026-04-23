@@ -51,3 +51,9 @@ output "dynamodb_table_name" {
   description = "DynamoDB table storing VPC metadata"
   value       = aws_dynamodb_table.vpc_resources.name
 }
+
+
+output "dynamodb_table_arn" {
+  description = "DynamoDB table storing VPC metadata"
+  value       = aws_dynamodb_table.vpc_resources.arn
+}

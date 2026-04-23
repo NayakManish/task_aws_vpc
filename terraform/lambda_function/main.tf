@@ -17,7 +17,7 @@ terraform {
     bucket   = "nayak-manish-terraform-statefiles-va"
     region   = "us-east-1"
     profile  = "manishnayaks-aws"
-    key      = "vpc-tools/dynamodb/terraform.tfstate"
+    key      = "vpc-tools/lambda/terraform.tfstate"
   }
 }
 
@@ -81,7 +81,7 @@ resource "aws_iam_role_policy" "lambda_policy" {
           "dynamodb:Scan",
           "dynamodb:Query"
         ]
-        Resource = data.terraform_remote_state.dynamodb.outputs.table_arn
+        Resource = "${data.terraform_remote_state.dynamodb.outputs.dynamodb_table_arn}"
       },
       # EC2 — VPC and subnet management
       # Scoped to VPC operations only — not full EC2 admin
@@ -137,7 +137,7 @@ resource "aws_lambda_function" "vpc_api" {
 
   environment {
     variables = {
-      DYNAMODB_TABLE_NAME = data.terraform_remote_state.dynamodb.outputs.name
+      DYNAMODB_TABLE_NAME = "${data.terraform_remote_state.dynamodb.outputs.dynamodb_table_name}"
       LOG_LEVEL           = "INFO"
     }
   }
@@ -161,4 +161,9 @@ variable "aws_region" {
 output "lambda_function_name" {
   description = "Lambda function name for monitoring"
   value       = aws_lambda_function.vpc_api.function_name
+}
+
+output "lambda_invoke_arn" {
+  description = "ARN for API Gateway to invoke Lambda"
+  value       = aws_lambda_function.vpc_api.invoke_arn
 }
