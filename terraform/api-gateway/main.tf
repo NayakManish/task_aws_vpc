@@ -178,11 +178,15 @@ resource "aws_api_gateway_stage" "vpc_api" {
   rest_api_id   = aws_api_gateway_rest_api.vpc_api.id
   stage_name    = "Live"
 
-  # Enable CloudWatch logging for API Gateway
-  # API Gateway requires format to be a single line with newline only at end
+  # Access logs — one line per request (who, what, status, latency).
+  # Extended with the integration status + Lambda error + latency fields,
+  # which are the single most useful signals for 502 triage: integrationStatus
+  # tells you what Lambda actually returned to the gateway, integrationLatency
+  # tells you whether Lambda timed out, and integrationErrorMessage surfaces
+  # the raw reason API Gateway rejected the Lambda response.
   access_log_settings {
     destination_arn = aws_cloudwatch_log_group.api_gateway_logs.arn
-    format          = "{\"requestId\":\"$context.requestId\",\"ip\":\"$context.identity.sourceIp\",\"caller\":\"$context.identity.caller\",\"user\":\"$context.identity.user\",\"requestTime\":\"$context.requestTime\",\"httpMethod\":\"$context.httpMethod\",\"path\":\"$context.path\",\"status\":\"$context.status\",\"protocol\":\"$context.protocol\",\"responseLength\":\"$context.responseLength\"}"
+    format          = "{\"requestId\":\"$context.requestId\",\"extendedRequestId\":\"$context.extendedRequestId\",\"ip\":\"$context.identity.sourceIp\",\"user\":\"$context.identity.user\",\"requestTime\":\"$context.requestTime\",\"httpMethod\":\"$context.httpMethod\",\"resourcePath\":\"$context.resourcePath\",\"path\":\"$context.path\",\"status\":\"$context.status\",\"protocol\":\"$context.protocol\",\"responseLength\":\"$context.responseLength\",\"responseLatency\":\"$context.responseLatency\",\"integrationStatus\":\"$context.integrationStatus\",\"integrationLatency\":\"$context.integrationLatency\",\"integrationErrorMessage\":\"$context.integrationErrorMessage\",\"authorizerError\":\"$context.authorizer.error\"}"
   }
 
   # Enable X-Ray tracing
@@ -191,6 +195,25 @@ resource "aws_api_gateway_stage" "vpc_api" {
   depends_on = [
     aws_api_gateway_account.account
   ]
+}
+
+# Execution-level logging — full request/response bodies sent to & received
+# from the Lambda integration. This is what actually reveals "Lambda returned
+# a malformed response" vs "Lambda timed out" vs "Lambda threw on init".
+# INFO + data_trace_enabled is verbose; keep it on while debugging 502s and
+# dial back to ERROR once the root cause is found.
+resource "aws_api_gateway_method_settings" "vpc_api_all" {
+  rest_api_id = aws_api_gateway_rest_api.vpc_api.id
+  stage_name  = aws_api_gateway_stage.vpc_api.stage_name
+  method_path = "*/*"
+
+  settings {
+    metrics_enabled      = true
+    logging_level        = "INFO"
+    data_trace_enabled   = true   # logs full request/response bodies — dev only
+    throttling_rate_limit  = 100
+    throttling_burst_limit = 50
+  }
 }
 
 resource "aws_cloudwatch_log_group" "api_gateway_logs" {

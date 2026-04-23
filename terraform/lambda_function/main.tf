@@ -127,13 +127,29 @@ data "archive_file" "lambda_package" {
 
 # ── Lambda Function ───────────────────────────────────────────────
 
+# Explicit log group so we control retention and the group exists BEFORE the
+# function does (prevents the "no log group / no logs visible" 502 dead-end).
+resource "aws_cloudwatch_log_group" "lambda_logs" {
+  name              = "/aws/lambda/vpc-api-handler"
+  retention_in_days = 14
+}
+
 resource "aws_lambda_function" "vpc_api" {
   filename         = data.archive_file.lambda_package.output_path
   function_name    = "vpc-api-handler"
   role             = aws_iam_role.lambda_execution.arn
-  handler          = "handlers.vpc_handler.handler"
+  # IMPORTANT: handler path must match the zip layout.
+  # Zip root = lambda_source/, entry file = vpc_handler.py, function = handler.
+  # The old value "handlers.vpc_handler.handler" looked for a non-existent
+  # handlers/ package and caused Lambda init to fail → API Gateway 502.
+  handler          = "vpc_handler.handler"
   runtime          = "python3.12"
   source_code_hash = data.archive_file.lambda_package.output_base64sha256
+
+  # VPC + subnet + DynamoDB round-trips can easily exceed the default 3s.
+  # A too-low timeout causes API Gateway to receive no response → 502.
+  timeout     = 30
+  memory_size = 512
 
   environment {
     variables = {
@@ -147,6 +163,11 @@ resource "aws_lambda_function" "vpc_api" {
     mode = "Active"
   }
 
+  # Make sure the log group is created before the function so the first
+  # invocation's logs are captured (otherwise Lambda auto-creates with
+  # indefinite retention and we lose control).
+  depends_on = [aws_cloudwatch_log_group.lambda_logs]
+
   tags = {
     Name = "vpc-api-handler"
   }
@@ -155,7 +176,9 @@ resource "aws_lambda_function" "vpc_api" {
 variable "aws_region" {
   description = "AWS region to deploy resources"
   type        = string
-  default     = "eu-east-1"
+  # NOTE: previous default "eu-east-1" is NOT a real AWS region.
+  # The provider above pins us to us-east-1, so align the default.
+  default     = "us-east-1"
 }
 
 output "lambda_function_name" {

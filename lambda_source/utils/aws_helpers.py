@@ -1,7 +1,7 @@
 """
-AWS Helpers — Enhanced with negative scenario handling and rollback.
+AWS Helpers
 
-New in this version:
+Scenarios covered:
     1. Dependency check before VPC deletion
     2. Partial failure handling with automatic rollback
     3. VPC limit check before attempting creation
@@ -10,7 +10,6 @@ New in this version:
     6. Duplicate name check (idempotency guard)
     7. AWS throttling with exponential backoff
 
-Author: Platform Engineering
 """
 
 import logging
