@@ -19,7 +19,7 @@ from typing import Optional
 import ipaddress
 
 import boto3
-from botocore.exceptions import ClientError
+from botocore.exceptions import ClientError, ParamValidationError
 
 from models.vpc_model import VPCModel
 from utils.exceptions import (
@@ -30,6 +30,13 @@ from utils.exceptions import (
 
 logger = logging.getLogger(__name__)
 VPC_LIMIT = int(os.environ.get('VPC_LIMIT', '5'))
+
+
+def _step(name: str, **fields):
+    """Uniform per-step log — makes it trivial to grep
+    `msg = "create_step"` in CloudWatch to see exactly where a create
+    got to before a 500."""
+    logger.info("create_step", extra={"step": name, **fields})
 
 
 def _with_backoff(func, *args, max_retries=3, **kwargs):
@@ -170,9 +177,16 @@ def check_vpc_dependencies(ec2, vpc_id: str) -> list:
 def create_vpc_resources(name, cidr_block, region, subnets, tags, created_by):
     ec2 = boto3.client('ec2', region_name=region)
 
+    _step("pre_check_vpc_limit", region=region)
     check_vpc_limit(ec2, region)
+
+    _step("pre_check_cidr_overlap", cidr=cidr_block)
     check_cidr_overlap(ec2, cidr_block)
+
+    _step("pre_check_duplicate_name", vpcName=name)
     check_duplicate_name(name)
+
+    _step("pre_check_availability_zones", subnetCount=len(subnets))
     validate_availability_zones(ec2, subnets, region)
 
     vpc_id = None
@@ -180,34 +194,66 @@ def create_vpc_resources(name, cidr_block, region, subnets, tags, created_by):
     igw_id = None
 
     try:
+        _step("create_vpc", cidr=cidr_block)
         vpc_response = _with_backoff(
             ec2.create_vpc,
             CidrBlock=cidr_block,
             TagSpecifications=[{'ResourceType': 'vpc', 'Tags': _build_tags(name, tags, created_by)}]
         )
         vpc_id = vpc_response['Vpc']['VpcId']
+        _step("create_vpc_done", vpcId=vpc_id)
+
+        _step("modify_vpc_attribute_dns_hostnames", vpcId=vpc_id)
         ec2.modify_vpc_attribute(VpcId=vpc_id, EnableDnsHostnames={'Value': True})
+
+        _step("modify_vpc_attribute_dns_support", vpcId=vpc_id)
         ec2.modify_vpc_attribute(VpcId=vpc_id, EnableDnsSupport={'Value': True})
 
         has_public = any(s.get('subnet_type') == 'public' for s in subnets)
         if has_public:
+            _step("create_internet_gateway", vpcId=vpc_id)
             igw_id = _create_internet_gateway(ec2, vpc_id, name, tags, created_by)
+            _step("create_internet_gateway_done", vpcId=vpc_id, igwId=igw_id)
 
         subnet_errors = []
-        for subnet_config in subnets:
+        for idx, subnet_config in enumerate(subnets):
+            subnet_name = subnet_config.get('name')
+            _step("create_subnet", vpcId=vpc_id, index=idx, subnetName=subnet_name,
+                  cidr=subnet_config.get('cidr_block'),
+                  az=subnet_config.get('availability_zone'),
+                  type=subnet_config.get('subnet_type', 'private'))
             try:
                 subnet_data = _create_subnet(ec2, vpc_id, subnet_config, igw_id, tags, created_by)
                 created_subnets.append(subnet_data)
+                _step("create_subnet_done", vpcId=vpc_id, subnetId=subnet_data['subnet_id'])
             except ClientError as e:
+                code = e.response['Error']['Code']
                 subnet_errors.append({
-                    'subnet_name': subnet_config.get('name'),
+                    'subnet_name': subnet_name,
                     'cidr_block':  subnet_config.get('cidr_block'),
-                    'error_code':  e.response['Error']['Code'],
+                    'error_code':  code,
                     'error':       e.response['Error']['Message']
                 })
-                logger.error("Subnet creation failed", extra={'subnet': subnet_config.get('name'), 'error': str(e)})
+                logger.error("subnet_create_failed", extra={
+                    'vpcId': vpc_id, 'subnetName': subnet_name,
+                    'errorCode': code, 'errorMessage': e.response['Error']['Message'],
+                })
+            except ParamValidationError as e:
+                # Bad input shape (e.g. missing AvailabilityZone). This is a
+                # 400-class problem, not a 500 — surface it as ValidationError.
+                logger.warning("subnet_param_validation_failed", extra={
+                    'vpcId': vpc_id, 'subnetName': subnet_name, 'error': str(e),
+                })
+                subnet_errors.append({
+                    'subnet_name': subnet_name,
+                    'cidr_block':  subnet_config.get('cidr_block'),
+                    'error_code':  'ParamValidationError',
+                    'error':       str(e),
+                })
 
         if subnet_errors and not created_subnets:
+            logger.error("all_subnets_failed_rolling_back", extra={
+                'vpcId': vpc_id, 'errors': subnet_errors})
             _rollback_vpc(ec2, vpc_id, [], igw_id)
             raise PartialFailureError(
                 message="All subnets failed — VPC rolled back",
@@ -221,11 +267,16 @@ def create_vpc_resources(name, cidr_block, region, subnets, tags, created_by):
         }
 
         try:
+            _step("dynamodb_save", vpcId=vpc_id)
             model = VPCModel()
             saved = model.save(vpc_record)
+            _step("dynamodb_save_done", vpcId=vpc_id)
         except Exception as db_err:
-            logger.critical("VPC created but DynamoDB failed — manual reconciliation required",
-                            extra={"vpc_id": vpc_id, "error": str(db_err)})
+            logger.critical("dynamodb_save_failed_vpc_orphaned", extra={
+                "vpcId": vpc_id,
+                "errorType": type(db_err).__name__,
+                "errorMessage": str(db_err),
+            }, exc_info=True)
             raise PartialFailureError(
                 message=f"VPC {vpc_id} created in AWS but metadata storage failed.",
                 created=[vpc_id] + [s['subnet_id'] for s in created_subnets],
@@ -243,15 +294,26 @@ def create_vpc_resources(name, cidr_block, region, subnets, tags, created_by):
 
     except (ResourceConflictError, PartialFailureError, AWSThrottlingError, AWSPermissionError, ValidationError):
         raise
+    except ParamValidationError as e:
+        # Bad args sent to boto3 (usually means the request body is missing
+        # a field the code assumed was present). 400, not 500.
+        if vpc_id:
+            _rollback_vpc(ec2, vpc_id, created_subnets, igw_id)
+        logger.warning("param_validation_failed_in_create", extra={"error": str(e)})
+        raise ValidationError(f"Invalid request for AWS API: {e}")
     except ClientError as e:
         code = e.response['Error']['Code']
+        message = e.response['Error']['Message']
+        logger.error("client_error_in_create", extra={
+            "vpcId": vpc_id, "errorCode": code, "errorMessage": message,
+        })
         if vpc_id:
             _rollback_vpc(ec2, vpc_id, created_subnets, igw_id)
         if code in ('UnauthorizedOperation', 'AccessDenied'):
             raise AWSPermissionError(operation=code, resource=region)
         if code in ('RequestLimitExceeded', 'Throttling'):
             raise AWSThrottlingError("create_vpc")
-        raise InfrastructureError(e.response['Error']['Message'], aws_error_code=code)
+        raise InfrastructureError(message, aws_error_code=code)
 
 
 def delete_vpc_resources(vpc_id, region, subnet_ids, deleted_by):
@@ -319,12 +381,24 @@ def _rollback_vpc(ec2, vpc_id, created_subnets, igw_id):
 def _create_subnet(ec2, vpc_id, subnet_config, igw_id, parent_tags, created_by):
     subnet_name = subnet_config['name']
     subnet_type = subnet_config.get('subnet_type', 'private')
-    subnet_id = ec2.create_subnet(
-        VpcId=vpc_id, CidrBlock=subnet_config['cidr_block'],
-        AvailabilityZone=subnet_config.get('availability_zone'),
-        TagSpecifications=[{'ResourceType': 'subnet',
-                            'Tags': _build_tags(subnet_name, parent_tags, created_by, {'SubnetType': subnet_type})}]
-    )['Subnet']['SubnetId']
+
+    # AvailabilityZone is optional: EC2 will auto-pick one when omitted.
+    # But passing AvailabilityZone=None (not omitting it) triggers a boto3
+    # ParamValidationError which historically surfaced as a 500. Only include
+    # the kwarg when we actually have a value.
+    create_kwargs = {
+        "VpcId": vpc_id,
+        "CidrBlock": subnet_config['cidr_block'],
+        "TagSpecifications": [{
+            "ResourceType": "subnet",
+            "Tags": _build_tags(subnet_name, parent_tags, created_by, {"SubnetType": subnet_type}),
+        }],
+    }
+    az = subnet_config.get('availability_zone')
+    if az:
+        create_kwargs["AvailabilityZone"] = az
+
+    subnet_id = ec2.create_subnet(**create_kwargs)['Subnet']['SubnetId']
 
     if subnet_type == 'public':
         ec2.modify_subnet_attribute(SubnetId=subnet_id, MapPublicIpOnLaunch={'Value': True})

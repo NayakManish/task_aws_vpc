@@ -28,6 +28,39 @@ import traceback
 from typing import Any
 
 # ---------------------------------------------------------------------------
+# Logger safety net — runs BEFORE any logger.info/extra= call in this process.
+# ---------------------------------------------------------------------------
+# Python's logging.Logger.makeRecord raises
+#     KeyError: "Attempt to overwrite '<key>' in LogRecord"
+# if extra={} contains any key that shadows a built-in LogRecord attribute
+# (name, msg, message, module, args, levelname, pathname, lineno, funcName,
+# asctime, created, msecs, processName, threadName, exc_info, ...).
+#
+# A single log call with extra={"name": vpc_name} will crash the entire
+# request and surface as a 500. This is a common-enough footgun that we
+# simply auto-rename any conflicting key (prefixed with "x_") so a stray
+# "name"/"msg"/"module" in a caller can never take out the Lambda.
+_RESERVED_LOGRECORD_KEYS = {
+    "name", "msg", "args", "levelname", "levelno", "pathname", "filename",
+    "module", "exc_info", "exc_text", "stack_info", "lineno", "funcName",
+    "created", "msecs", "relativeCreated", "thread", "threadName",
+    "processName", "process", "message", "asctime",
+}
+_orig_make_record = logging.Logger.makeRecord
+
+def _safe_make_record(self, name, level, fn, lno, msg, args, exc_info,
+                      func=None, extra=None, sinfo=None):
+    if extra:
+        extra = {
+            (f"x_{k}" if k in _RESERVED_LOGRECORD_KEYS else k): v
+            for k, v in extra.items()
+        }
+    return _orig_make_record(self, name, level, fn, lno, msg, args, exc_info,
+                             func, extra, sinfo)
+
+logging.Logger.makeRecord = _safe_make_record
+
+# ---------------------------------------------------------------------------
 # Structured JSON logger
 # ---------------------------------------------------------------------------
 # AWS Lambda attaches its own handler to the root logger. We add a JSON
@@ -95,6 +128,7 @@ logger.info("cold_start", extra={
 # just sees "502 Bad Gateway" with no clue WHAT failed to import.
 # ---------------------------------------------------------------------------
 try:
+    from botocore.exceptions import ClientError, ParamValidationError
     from models.vpc_model import VPCModel
     from models.response_model import APIResponse
     from utils.aws_helpers import create_vpc_resources, delete_vpc_resources
@@ -194,17 +228,36 @@ def handler(event: dict, context: Any) -> dict:
     except AWSPermissionError as e:
         logger.warning("aws_permission_denied", extra={**log_ctx, "error": str(e)})
         response = APIResponse.forbidden(str(e))
+    except ParamValidationError as e:
+        # boto3 received bad kwargs — almost always means the request body is
+        # missing or malformed. 400, not 500.
+        logger.warning("param_validation_error", extra={
+            **log_ctx, "error": str(e),
+        })
+        response = APIResponse.bad_request(f"Invalid parameter: {e}")
+    except ClientError as e:
+        code = e.response.get("Error", {}).get("Code", "Unknown")
+        message = e.response.get("Error", {}).get("Message", str(e))
+        logger.error("aws_client_error", extra={
+            **log_ctx, "awsErrorCode": code, "awsErrorMessage": message,
+        }, exc_info=True)
+        if code in ("UnauthorizedOperation", "AccessDenied", "AccessDeniedException"):
+            response = APIResponse.forbidden(f"{code}: {message}")
+        elif code in ("Throttling", "RequestLimitExceeded", "ThrottlingException"):
+            response = APIResponse.too_many_requests(f"{code}: {message}")
+        else:
+            response = APIResponse.internal_error(f"AWS {code}: {message}")
     except (InfrastructureError, VPCAPIError) as e:
         logger.error("infra_or_api_error", extra={**log_ctx, "error": str(e)}, exc_info=True)
         response = APIResponse.internal_error(str(e))
     except Exception as e:
-        # This branch is the usual suspect behind 502s: an exception we didn't
+        # This branch is the usual suspect behind 500s: an exception we didn't
         # anticipate bubbles up here, we log the full traceback, and still
         # return a well-formed response so API GW gets valid JSON.
         logger.exception("unhandled_exception", extra={
             **log_ctx, "errorType": type(e).__name__, "errorMessage": str(e),
         })
-        response = APIResponse.internal_error("An unexpected error occurred")
+        response = APIResponse.internal_error(f"{type(e).__name__}: {e}")
 
     duration_ms = int((time.time() - started_at) * 1000)
     # Validate response shape — if we ever return something that isn't a
@@ -226,7 +279,7 @@ def _create_vpc(body, user_email, log_ctx):
     if err:
         raise ValidationError(err)
     logger.info("create_vpc_start", extra={
-        **log_ctx, "name": body.get("name"), "cidr": body.get("cidr_block"),
+        **log_ctx, "vpcName": body.get("name"), "cidr": body.get("cidr_block"),
         "subnetCount": len(body.get("subnets", [])),
     })
     result = create_vpc_resources(
