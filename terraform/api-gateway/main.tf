@@ -46,6 +46,34 @@ data "terraform_remote_state" "cognito_user_pool" {
   }
 }
 
+// Allow API Gateway to push logs to CloudWatch. API Gateway requires an
+// account-level CloudWatch role to be set before stage-level logging can be
+// enabled. This creates a role trusted by API Gateway and attaches the
+// managed policy that grants the necessary CloudWatch permissions.
+resource "aws_iam_role" "api_gateway_cloudwatch_role" {
+  name = "apigateway-cloudwatch-role"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect    = "Allow"
+      Principal = { Service = "apigateway.amazonaws.com" }
+      Action    = "sts:AssumeRole"
+    }]
+  })
+}
+
+resource "aws_iam_role_policy_attachment" "api_gateway_cloudwatch_role_attach" {
+  role       = aws_iam_role.api_gateway_cloudwatch_role.name
+  policy_arn = "arn:aws:iam::aws:policy/service-role/AmazonAPIGatewayPushToCloudWatchLogs"
+}
+
+// Set the account-level CloudWatch role for API Gateway. This is a singleton
+// resource per account/region and must be present for stage logging to work.
+resource "aws_api_gateway_account" "account" {
+  cloudwatch_role_arn = aws_iam_role.api_gateway_cloudwatch_role.arn
+}
+
 
 resource "aws_api_gateway_rest_api" "vpc_api" {
   name        = "vpc-api"
@@ -148,16 +176,21 @@ resource "aws_api_gateway_deployment" "vpc_api" {
 resource "aws_api_gateway_stage" "vpc_api" {
   deployment_id = aws_api_gateway_deployment.vpc_api.id
   rest_api_id   = aws_api_gateway_rest_api.vpc_api.id
-  stage_name    = "prod"
+  stage_name    = "Live"
 
   # Enable CloudWatch logging for API Gateway
+  # API Gateway requires format to be a single line with newline only at end
   access_log_settings {
     destination_arn = aws_cloudwatch_log_group.api_gateway_logs.arn
-    format          = "json"
+    format          = "{\"requestId\":\"$context.requestId\",\"ip\":\"$context.identity.sourceIp\",\"caller\":\"$context.identity.caller\",\"user\":\"$context.identity.user\",\"requestTime\":\"$context.requestTime\",\"httpMethod\":\"$context.httpMethod\",\"path\":\"$context.path\",\"status\":\"$context.status\",\"protocol\":\"$context.protocol\",\"responseLength\":\"$context.responseLength\"}"
   }
 
   # Enable X-Ray tracing
   xray_tracing_enabled = true
+
+  depends_on = [
+    aws_api_gateway_account.account
+  ]
 }
 
 resource "aws_cloudwatch_log_group" "api_gateway_logs" {
@@ -169,4 +202,9 @@ resource "aws_cloudwatch_log_group" "api_gateway_logs" {
 output "api_endpoint" {
   description = "API Gateway base URL"
   value       = "${aws_api_gateway_stage.vpc_api.invoke_url}"
+}
+
+output "api_name" {
+  description = "API Gateway name"
+  value       = aws_api_gateway_rest_api.vpc_api.name
 }

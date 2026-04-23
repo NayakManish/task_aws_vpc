@@ -40,7 +40,7 @@ resource "aws_cognito_user_pool" "vpc_api" {
   }
 
   # MFA — optional but recommended for production
-  mfa_configuration = "OPTIONAL"
+  mfa_configuration = "OFF"
 
   tags = {
     Name = "vpc-api-users"

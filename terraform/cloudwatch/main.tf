@@ -13,7 +13,7 @@ terraform {
     bucket   = "nayak-manish-terraform-statefiles-va"
     region   = "us-east-1"
     profile  = "manishnayaks-aws"
-    key      = "vpc-tools/dynamodb/terraform.tfstate"
+    key      = "vpc-tools/cloudwatch/terraform.tfstate"
   }
 }
 
@@ -150,7 +150,7 @@ resource "aws_cloudwatch_metric_alarm" "lambda_no_invocations" {
     FunctionName = data.terraform_remote_state.lambda.outputs.lambda_function_name
   }
   statistic           = "Sum"
-  period              = 3600   # 1 hour
+  period              = 3600*24   # 1 day
   evaluation_periods  = 1
   threshold           = 1
   comparison_operator = "LessThanThreshold"
@@ -168,7 +168,7 @@ resource "aws_cloudwatch_metric_alarm" "apigw_4xx_rate" {
   namespace           = "AWS/ApiGateway"
   metric_name         = "4XXError"
   dimensions = {
-    ApiName  = data.terraform_remote_state.api-gateway.id
+    ApiName  = data.terraform_remote_state.api-gateway.outputs.api_name
   }
   statistic           = "Average"
   period              = 300
@@ -186,7 +186,7 @@ resource "aws_cloudwatch_metric_alarm" "apigw_5xx_errors" {
   namespace           = "AWS/ApiGateway"
   metric_name         = "5XXError"
   dimensions = {
-    ApiName  = data.terraform_remote_state.api-gateway.id
+    ApiName  = data.terraform_remote_state.api-gateway.outputs.api_name
   }
   statistic           = "Sum"
   period              = 60
@@ -205,7 +205,7 @@ resource "aws_cloudwatch_metric_alarm" "apigw_latency" {
   namespace           = "AWS/ApiGateway"
   metric_name         = "Latency"
   dimensions = {
-    ApiName  = data.terraform_remote_state.api-gateway.id
+    ApiName  = data.terraform_remote_state.api-gateway.outputs.api_name
   }
   extended_statistic  = "p99"
   period              = 300
@@ -353,6 +353,7 @@ resource "aws_cloudwatch_dashboard" "vpc_api" {
         type   = "metric"
         x      = 0, y = 0, width = 12, height = 6
         properties = {
+          region = var.aws_region
           title  = "Lambda — Invocations, Errors, Throttles"
           view   = "timeSeries"
           period = 60
@@ -367,13 +368,14 @@ resource "aws_cloudwatch_dashboard" "vpc_api" {
         type   = "metric"
         x      = 12, y = 0, width = 12, height = 6
         properties = {
+          region = var.aws_region
           title  = "API Gateway — 4xx, 5xx, Latency p99"
           view   = "timeSeries"
           period = 60
           metrics = [
-            ["AWS/ApiGateway", "4XXError", "ApiName", data.terraform_remote_state.api-gateway.id, {stat="Sum", color="#ff7f0e"}],
-            ["AWS/ApiGateway", "5XXError", "ApiName", data.terraform_remote_state.api-gateway.id, {stat="Sum", color="#d62728"}],
-            ["AWS/ApiGateway", "Latency",  "ApiName", data.terraform_remote_state.api-gateway.id, {stat="p99",  yAxis="right"}]
+            ["AWS/ApiGateway", "4XXError", "ApiName", data.terraform_remote_state.api-gateway.outputs.api_name, {stat="Sum", color="#ff7f0e"}],
+            ["AWS/ApiGateway", "5XXError", "ApiName", data.terraform_remote_state.api-gateway.outputs.api_name, {stat="Sum", color="#d62728"}],
+            ["AWS/ApiGateway", "Latency",  "ApiName", data.terraform_remote_state.api-gateway.outputs.api_name, {stat="p99",  yAxis="right"}]
           ]
         }
       },
@@ -381,6 +383,7 @@ resource "aws_cloudwatch_dashboard" "vpc_api" {
         type   = "metric"
         x      = 0, y = 6, width = 12, height = 6
         properties = {
+          region = var.aws_region
           title  = "DynamoDB — Throttles and System Errors"
           view   = "timeSeries"
           period = 60
@@ -395,6 +398,7 @@ resource "aws_cloudwatch_dashboard" "vpc_api" {
         type   = "metric"
         x      = 12, y = 6, width = 12, height = 6
         properties = {
+          region = var.aws_region
           title  = "Application Events — Partial Failures, Rollbacks, Dependency Blocks"
           view   = "timeSeries"
           period = 300
