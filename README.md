@@ -11,7 +11,7 @@ Serverless REST API for AWS VPC resource creation, retrieval, and deletion. Buil
 - **API:** API Gateway (REST, Cognito-protected) — handles HTTP routing
 - **Data:** DynamoDB (on-demand billing) — stores VPC metadata
 - **Monitoring:** CloudWatch alarms, X-Ray tracing
-- **IaC:** OpenTofu/Terraform — infrastructure as code
+- **IaC:** terraform/Terraform — infrastructure as code
 - **Auth:** Cognito User Pools — JWT token validation
 
 ### Design Principles
@@ -38,7 +38,7 @@ task_aws_vpc/
 │   ├── test_validators.py      # Unit tests for validators
 │   └── test_negative_scenarios.py  # Integration tests
 │
-├── terraform/                  # Infrastructure as code (OpenTofu/Terraform)
+├── terraform/                  # Infrastructure as code (terraform/Terraform)
 │   ├── dynamodb/
 │   │   └── main.tf            # DynamoDB table (VPC metadata)
 │   ├── lambda_function/
@@ -259,7 +259,7 @@ VPCAPIError (base)
 - ✅ S3 bucket for Terraform state files
 
 ### Local Tools
-- OpenTofu >= 1.6.6 (or Terraform >= 1.6.6)
+- Terraform >= 1.6.6
 - AWS CLI v2
 - Python 3.12+
 - Git
@@ -290,41 +290,41 @@ Initialize each Terraform module and apply in order:
 **DynamoDB:**
 ```bash
 cd terraform/dynamodb
-opentofu init -input=false
-opentofu plan -out=tfplan
-opentofu apply tfplan
+terraform init 
+terraform plan 
+terraform apply
 ```
 
 **Cognito User Pool:**
 ```bash
 cd ../cognito_user_pool
-opentofu init -input=false
-opentofu plan -out=tfplan
-opentofu apply tfplan
+terraform init 
+terraform plan 
+terraform apply
 ```
 
 **Lambda Function:**
 ```bash
 cd ../lambda_function
-opentofu init -input=false
-opentofu plan -out=tfplan
-opentofu apply tfplan
+terraform init 
+terraform plan 
+terraform apply
 ```
 
 **API Gateway:**
 ```bash
 cd ../api-gateway
-opentofu init -input=false
-opentofu plan -out=tfplan
-opentofu apply tfplan
+terraform init 
+terraform plan 
+terraform apply
 ```
 
 **CloudWatch (optional, for monitoring):**
 ```bash
 cd ../cloudwatch
-opentofu init -input=false
-opentofu plan -out=tfplan
-opentofu apply tfplan
+terraform init 
+terraform plan 
+terraform apply
 ```
 
 ### 2. Get API Endpoint & Cognito Details
@@ -332,14 +332,14 @@ opentofu apply tfplan
 After deployment, retrieve outputs:
 ```bash
 cd terraform/api-gateway
-opentofu output api_endpoint
+terraform output api_endpoint
 ```
 
 For Cognito credentials:
 ```bash
 cd ../cognito_user_pool
-opentofu output user_pool_id
-opentofu output user_pool_client_id
+terraform output user_pool_id
+terraform output user_pool_client_id
 ```
 
 ---
@@ -515,24 +515,24 @@ stage_name = "prod"  # Instead of "Live"
 ### View Terraform State
 ```bash
 cd terraform/dynamodb
-opentofu state list
-opentofu state show aws_dynamodb_table.vpc_resources
+terraform state list
+terraform state show aws_dynamodb_table.vpc_resources
 ```
 
 ### Destroy Infrastructure
 ```bash
 # Destroy in reverse order
-cd terraform/cloudwatch && opentofu destroy -auto-approve
-cd ../api-gateway && opentofu destroy -auto-approve
-cd ../lambda_function && opentofu destroy -auto-approve
-cd ../cognito_user_pool && opentofu destroy -auto-approve
-cd ../dynamodb && opentofu destroy -auto-approve
+cd terraform/cloudwatch && terraform destroy -auto-approve
+cd ../api-gateway && terraform destroy -auto-approve
+cd ../lambda_function && terraform destroy -auto-approve
+cd ../cognito_user_pool && terraform destroy -auto-approve
+cd ../dynamodb && terraform destroy -auto-approve
 ```
 
 ### Read DynamoDB Table Name from State
 ```bash
 cd terraform/dynamodb
-opentofu output dynamodb_table_name
+terraform output dynamodb_table_name
 # Output: vpc-api-resources
 ```
 
@@ -559,14 +559,14 @@ aws logs tail /aws/lambda/vpc-api-handler --follow
 
 For infrastructure debugging:
 ```bash
-opentofu plan -out=tfplan  # Review changes
-opentofu show tfplan        # Inspect execution plan
+terraform plan     # Review changes
+terraform show     # Inspect execution plan
 ```
 
 ---
 
 **Author:** Platform Engineering  
 **Last Updated:** April 2024  
-**OpenTofu/Terraform Version:** >= 1.6.6  
+**terraform/Terraform Version:** >= 1.6.6  
 **Python Version:** 3.12  
 **AWS SDK:** boto3
